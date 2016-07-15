@@ -24,12 +24,26 @@ use HashMap;
 pub trait MaybeAtom: Clone + Debug + HeapSizeOf + PartialEq {
     fn equals_atom(&self, other: &Atom) -> bool;
     fn from_cow_str(cow: Cow<str>) -> Self;
+    fn starts_with(&self, value: &Self) -> bool;
+    fn ends_with(&self, value: &Self) -> bool;
+    fn contains(&self, value: &Self) -> bool;
+    fn char_at(&self, pos: usize) -> char;
+    fn len(&self) -> usize;
+    fn eq_ignore_ascii_case(&self, other: &Self) -> bool;
+    fn contains_splitted_by(&self, split: &[u8], other: &Self) -> bool;
 }
 
 #[cfg(not(feature = "heap_size"))]
 pub trait MaybeAtom: Clone + Debug + PartialEq {
     fn equals_atom(&self, other: &Atom) -> bool;
     fn from_cow_str(cow: Cow<str>) -> Self;
+    fn starts_with(&self, value: &Self) -> bool;
+    fn ends_with(&self, value: &Self) -> bool;
+    fn contains(&self, value: &Self) -> bool;
+    fn char_at(&self, pos: usize) -> char;
+    fn len(&self) -> usize;
+    fn eq_ignore_ascii_case(&self, other: &Self) -> bool;
+    fn contains_splitted_by(&self, split: &[u8], other: &Self) -> bool;
 }
 
 impl MaybeAtom for String {
@@ -37,14 +51,45 @@ impl MaybeAtom for String {
     fn equals_atom(&self, other: &Atom) -> bool {
         self == &**other
     }
+
     #[cfg(feature = "gecko")]
     fn equals_atom(&self, _: &Atom) -> bool {
         // We could implement this with a smart UTF-8/UTF-16 comparator over
         // FFI, but we don't need it since we use Atoms for Gecko.
         unimplemented!()
     }
+
     fn from_cow_str(cow: Cow<str>) -> Self {
         cow.into_owned()
+    }
+
+    fn starts_with(&self, value: &Self) -> bool {
+        str::starts_with(self, value)
+    }
+
+    fn ends_with(&self, value: &Self) -> bool {
+        str::ends_with(self, value)
+    }
+
+    fn contains(&self, value: &Self) -> bool {
+        str::contains(self, value)
+    }
+
+    fn char_at(&self, pos: usize) -> char {
+        self[pos..].chars().next().expect("Index out of bounds")
+    }
+
+    fn len(&self) -> usize {
+        str::len(self)
+    }
+
+    fn eq_ignore_ascii_case(&self, other: &Self) -> bool {
+        str::eq_ignore_ascii_case(self, other)
+    }
+
+    fn contains_splitted_by(&self, split: &[u8], other: &Self) -> bool {
+        self.split(|c| split.iter().any(|b| *b as char == c))
+            .any(|v| v == other)
     }
 }
 
@@ -52,8 +97,37 @@ impl MaybeAtom for Atom {
     fn equals_atom(&self, other: &Atom) -> bool {
         self == other
     }
+
     fn from_cow_str(cow: Cow<str>) -> Self {
         Atom::from(cow)
+    }
+
+    fn starts_with(&self, value: &Self) -> bool {
+        Atom::starts_with(self, value)
+    }
+
+    fn ends_with(&self, value: &Self) -> bool {
+        Atom::ends_with(self, value)
+    }
+
+    fn contains(&self, value: &Self) -> bool {
+        Atom::contains(self, value)
+    }
+
+    fn char_at(&self, pos: usize) -> char {
+        Atom::char_at(self, pos)
+    }
+
+    fn len(&self) -> usize {
+        Atom::len(self)
+    }
+
+    fn eq_ignore_ascii_case(&self, other: &Self) -> bool {
+        Atom::eq_ignore_ascii_case(self, other)
+    }
+
+    fn contains_splitted_by(&self, split: &[u8], other: &Self) -> bool {
+        Atom::contains_splitted_by(self, split, other)
     }
 }
 
