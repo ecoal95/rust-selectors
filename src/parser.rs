@@ -59,7 +59,7 @@ impl MaybeAtom for Atom {
 
 /// This trait allows to define the parser implementation in regards
 /// of pseudo-classes/elements
-pub trait SelectorImpl {
+pub trait SelectorImpl : Debug {
     type AttrString: MaybeAtom;
 
     /// non tree-structural pseudo-classes
