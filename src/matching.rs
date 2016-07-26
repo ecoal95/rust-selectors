@@ -9,7 +9,7 @@ use smallvec::VecLike;
 use quickersort::sort_by;
 use string_cache::Atom;
 
-use parser::{CaseSensitivity, Combinator, CompoundSelector, LocalName};
+use parser::{AttrSelector, CaseSensitivity, Combinator, CompoundSelector, LocalName};
 use parser::{MaybeAtom, SimpleSelector, Selector, SelectorImpl};
 use tree::Element;
 use HashMap;
@@ -73,7 +73,7 @@ impl<T, Impl: SelectorImpl> SelectorMap<T, Impl> {
                                         element: &E,
                                         parent_bf: Option<&BloomFilter>,
                                         matching_rules_list: &mut V,
-                                        shareable: &mut bool)
+                                        relations: &mut StyleRelations)
     where E: Element<Impl=Impl, AttrString=Impl::AttrString>,
           V: VecLike<DeclarationBlock<T>>
     {
@@ -89,7 +89,7 @@ impl<T, Impl: SelectorImpl> SelectorMap<T, Impl> {
                                                       &self.id_hash,
                                                       &id,
                                                       matching_rules_list,
-                                                      shareable)
+                                                      relations)
         }
 
         element.each_class(|class| {
@@ -98,7 +98,7 @@ impl<T, Impl: SelectorImpl> SelectorMap<T, Impl> {
                                                       &self.class_hash,
                                                       class,
                                                       matching_rules_list,
-                                                      shareable);
+                                                      relations);
         });
 
         let local_name_hash = if element.is_html_element_in_html_document() {
@@ -111,13 +111,13 @@ impl<T, Impl: SelectorImpl> SelectorMap<T, Impl> {
                                                   local_name_hash,
                                                   &element.get_local_name(),
                                                   matching_rules_list,
-                                                  shareable);
+                                                  relations);
 
         SelectorMap::get_matching_rules(element,
                                         parent_bf,
                                         &self.other_rules,
                                         matching_rules_list,
-                                        shareable);
+                                        relations);
 
         // Sort only the rules we just added.
         sort_by(&mut matching_rules_list[init_len..], &compare);
@@ -150,7 +150,7 @@ impl<T, Impl: SelectorImpl> SelectorMap<T, Impl> {
                                           hash: &HashMap<Atom, Vec<Rule<T, Impl>>>,
                                           key: &Atom,
                                           matching_rules: &mut V,
-                                          shareable: &mut bool)
+                                          relations: &mut StyleRelations)
         where E: Element<Impl=Impl, AttrString=Impl::AttrString>,
               V: VecLike<DeclarationBlock<T>>
     {
@@ -159,7 +159,7 @@ impl<T, Impl: SelectorImpl> SelectorMap<T, Impl> {
                                             parent_bf,
                                             rules,
                                             matching_rules,
-                                            shareable)
+                                            relations)
         }
     }
 
@@ -168,13 +168,13 @@ impl<T, Impl: SelectorImpl> SelectorMap<T, Impl> {
                                 parent_bf: Option<&BloomFilter>,
                                 rules: &[Rule<T, Impl>],
                                 matching_rules: &mut V,
-                                shareable: &mut bool)
+                                relations: &mut StyleRelations)
         where E: Element<Impl=Impl, AttrString=Impl::AttrString>,
               V: VecLike<DeclarationBlock<T>>
     {
         for rule in rules.iter() {
             if matches_compound_selector(&*rule.selector,
-                                         element, parent_bf, shareable) {
+                                         element, parent_bf, relations) {
                 matching_rules.push(rule.declarations.clone());
             }
         }
@@ -300,19 +300,71 @@ impl<T> DeclarationBlock<T> {
 }
 
 bitflags! {
-    #[doc = "Flags set on elements during the matching process."]
+    /// Set of flags that determine the different kind of elements affected by
+    /// the selector matching process.
+    ///
+    /// This is used to implement efficient sharing.
+    pub flags StyleRelations: u16 {
+        /// Whether this element has matched any rule that is determined by a
+        /// sibling (i.e., when using the `+` combinator).
+        const AFFECTED_BY_SIBLINGS = 0b01,
+
+        /// Whether this element has matched any rule whose matching is
+        /// determined by its position in the tree (i.e., first-child,
+        /// nth-child, etc.).
+        ///
+        /// XXX improve this description and name, "position" is too generic.
+        const AFFECTED_BY_POSITION = 0b10,
+
+        /// Whether this flag is affected by any state (i.e., non
+        /// tree-structural pseudo-class).
+        const AFFECTED_BY_STATE = 0b100,
+
+        /// Whether this element is affected by a (probably) unique selector,
+        /// like an ID selector.
+        const AFFECTED_BY_UNIQUE_SELECTOR = 0b1000,
+
+        /// Whether this element is affected by a non-common style-affecting
+        /// attribute.
+        const AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR = 0b10000,
+
+        /// Whether this element matches the :empty pseudo class.
+        const AFFECTED_BY_EMPTY = 0b100000,
+
+        /// Whether this element has a style attribute. Computed
+        /// externally.
+        const AFFECTED_BY_STYLE_ATTRIBUTE = 0b1000000,
+
+        /// Whether this element is affected by presentational hints. This is
+        /// computed externally (that is, in Servo).
+        const AFFECTED_BY_PRESENTATIONAL_HINTS = 0b10000000,
+
+        /// Whether this element has pseudo-element styles. Computed externally.
+        const AFFECTED_BY_PSEUDO_ELEMENTS = 0b100000000,
+    }
+}
+
+bitflags! {
+    /// Set of flags that are set on the parent depending on whether a child
+    /// matches a selector.
+    ///
+    /// These setters, in the case of Servo, must be atomic, due to the parallel
+    /// traversal.
     pub flags ElementFlags: u8 {
-        #[doc = "When a child is added or removed from this element, all the children must be"]
-        #[doc = "restyled, because they may match :nth-last-child, :last-of-type,"]
-        #[doc = ":nth-last-of-type, or :only-of-type."]
-        const HAS_SLOW_SELECTOR = 0x01,
-        #[doc = "When a child is added or removed from this element, any later children must be"]
-        #[doc = "restyled, because they may match :nth-child, :first-of-type, or :nth-of-type."]
-        const HAS_SLOW_SELECTOR_LATER_SIBLINGS = 0x02,
-        #[doc = "When a child is added or removed from this element, the first and last children"]
-        #[doc = "must be restyled, because they may match :first-child, :last-child, or"]
-        #[doc = ":only-child."]
-        const HAS_EDGE_CHILD_SELECTOR = 0x03,
+        /// When a child is added or removed from this element, all the children
+        /// must be restyled, because they may match :nth-last-child,
+        /// :last-of-type, :nth-last-of-type, or :only-of-type.
+        const HAS_SLOW_SELECTOR = 0b1,
+
+        /// When a child is added or removed from this element, any later
+        /// children must be restyled, because they may match :nth-child,
+        /// :first-of-type, or :nth-of-type.
+        const HAS_SLOW_SELECTOR_LATER_SIBLINGS = 0b10,
+
+        /// When a child is added or removed from this element, the first and
+        /// last children must be restyled, because they may match :first-child,
+        /// :last-child, or :only-child.
+        const HAS_EDGE_CHILD_SELECTOR = 0b100,
     }
 }
 
@@ -323,7 +375,7 @@ pub fn matches<E>(selector_list: &[Selector<E::Impl>],
                   where E: Element {
     selector_list.iter().any(|selector| {
         selector.pseudo_element.is_none() &&
-        matches_compound_selector(&*selector.compound_selectors, element, parent_bf, &mut false)
+        matches_compound_selector(&*selector.compound_selectors, element, parent_bf, &mut StyleRelations::empty())
     })
 }
 
@@ -336,12 +388,20 @@ pub fn matches<E>(selector_list: &[Selector<E::Impl>],
 pub fn matches_compound_selector<E>(selector: &CompoundSelector<E::Impl>,
                                     element: &E,
                                     parent_bf: Option<&BloomFilter>,
-                                    shareable: &mut bool)
+                                    relations: &mut StyleRelations)
                                     -> bool
     where E: Element
 {
-    match matches_compound_selector_internal(selector, element, parent_bf, shareable) {
-        SelectorMatchingResult::Matched => true,
+    match matches_compound_selector_internal(selector, element, parent_bf, relations) {
+        SelectorMatchingResult::Matched => {
+            match selector.next {
+                Some((_, Combinator::NextSibling)) |
+                Some((_, Combinator::LaterSibling)) => *relations |= AFFECTED_BY_SIBLINGS,
+                _ => {}
+            }
+
+            true
+        }
         _ => false
     }
 }
@@ -402,12 +462,12 @@ enum SelectorMatchingResult {
 fn can_fast_reject<E>(mut selector: &CompoundSelector<E::Impl>,
                       element: &E,
                       parent_bf: Option<&BloomFilter>,
-                      shareable: &mut bool)
+                      relations: &mut StyleRelations)
                       -> Option<SelectorMatchingResult>
     where E: Element
 {
     if !selector.simple_selectors.iter().all(|simple_selector| {
-      matches_simple_selector(simple_selector, element, shareable) }) {
+      matches_simple_selector(simple_selector, element, relations) }) {
         return Some(SelectorMatchingResult::NotMatchedAndRestartFromClosestLaterSibling);
     }
 
@@ -454,7 +514,6 @@ fn can_fast_reject<E>(mut selector: &CompoundSelector<E::Impl>,
                 _ => {},
             }
         }
-
     }
 
     // Can't fast reject.
@@ -464,11 +523,11 @@ fn can_fast_reject<E>(mut selector: &CompoundSelector<E::Impl>,
 fn matches_compound_selector_internal<E>(selector: &CompoundSelector<E::Impl>,
                                          element: &E,
                                          parent_bf: Option<&BloomFilter>,
-                                         shareable: &mut bool)
+                                         relations: &mut StyleRelations)
                                          -> SelectorMatchingResult
      where E: Element
 {
-    if let Some(result) = can_fast_reject(selector, element, parent_bf, shareable) {
+    if let Some(result) = can_fast_reject(selector, element, parent_bf, relations) {
         return result;
     }
 
@@ -494,7 +553,7 @@ fn matches_compound_selector_internal<E>(selector: &CompoundSelector<E::Impl>,
                 let result = matches_compound_selector_internal(&**next_selector,
                                                                 &element,
                                                                 parent_bf,
-                                                                shareable);
+                                                                relations);
                 match (result, combinator) {
                     // Return the status immediately.
                     (SelectorMatchingResult::Matched, _) => return result,
@@ -585,6 +644,44 @@ pub fn rare_style_affecting_attributes() -> [Atom; 3] {
     [ atom!("bgcolor"), atom!("border"), atom!("colspan") ]
 }
 
+#[inline]
+pub fn is_common_style_affecting_attribute_present(selector: &AttrSelector) -> bool {
+    for attr in &common_style_affecting_attributes() {
+        if selector.name == attr.atom {
+            if let CommonStyleAffectingAttributeMode::IsPresent(_) = attr.mode {
+                return true
+            }
+            // Short-circuit, common style affecting attributes aren't
+            // duplicated.
+            return false
+        }
+    }
+
+    false
+}
+
+#[inline]
+pub fn is_common_style_affecting_attribute<Impl>(selector: &AttrSelector,
+                                                 impl_value: &Impl::AttrString) -> bool
+    where Impl: SelectorImpl
+{
+    for attr in &common_style_affecting_attributes() {
+        if selector.name == attr.atom {
+            if let CommonStyleAffectingAttributeMode::IsEqual(ref value, _) = attr.mode {
+                if impl_value.equals_atom(value) {
+                    return true
+                }
+            }
+
+            // Short-circuit, common style affecting attributes aren't
+            // duplicated.
+            return false;
+        }
+    }
+
+    false
+}
+
 /// Determines whether the given element matches the given single selector.
 ///
 /// NB: If you add support for any new kinds of selectors to this routine, be sure to set
@@ -594,10 +691,20 @@ pub fn rare_style_affecting_attributes() -> [Atom; 3] {
 #[inline]
 pub fn matches_simple_selector<E>(selector: &SimpleSelector<E::Impl>,
                                   element: &E,
-                                  shareable: &mut bool)
-                                  -> bool
+                                  relations: &mut StyleRelations) -> bool
     where E: Element
 {
+    macro_rules! relation_if {
+        ($ex:expr, $flag:ident) => {
+            if $ex {
+                *relations |= $flag;
+                true
+            } else {
+                false
+            }
+        }
+    }
+
     match *selector {
         SimpleSelector::LocalName(LocalName { ref name, ref lower_name }) => {
             let name = if element.is_html_element_in_html_document() { lower_name } else { name };
@@ -608,121 +715,112 @@ pub fn matches_simple_selector<E>(selector: &SimpleSelector<E::Impl>,
         }
         // TODO: case-sensitivity depends on the document type and quirks mode
         SimpleSelector::ID(ref id) => {
-            *shareable = false;
-            element.get_id().map_or(false, |attr| {
-                attr == *id
-            })
+            relation_if!(element.get_id().map_or(false, |attr| attr == *id), AFFECTED_BY_UNIQUE_SELECTOR)
         }
         SimpleSelector::Class(ref class) => {
             element.has_class(class)
         }
         SimpleSelector::AttrExists(ref attr) => {
-            // NB(pcwalton): If you update this, remember to update the corresponding list in
-            // `can_share_style_with()` as well.
-            if common_style_affecting_attributes().iter().all(|common_attr_info| {
-                !(common_attr_info.atom == attr.name && match common_attr_info.mode {
-                    CommonStyleAffectingAttributeMode::IsPresent(_) => true,
-                    CommonStyleAffectingAttributeMode::IsEqual(..) => false,
-                })
-            }) {
-                *shareable = false;
+            let matches = element.match_attr_has(attr);
+
+            if matches && !is_common_style_affecting_attribute_present(attr) {
+                *relations |= AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR;
             }
-            element.match_attr_has(attr)
+
+            matches
         }
         SimpleSelector::AttrEqual(ref attr, ref value, case_sensitivity) => {
-            if !value.equals_atom(&atom!("dir")) &&
-                    common_style_affecting_attributes().iter().all(|common_attr_info| {
-                        !(common_attr_info.atom == attr.name && match common_attr_info.mode {
-                            CommonStyleAffectingAttributeMode::IsEqual(ref target_value, _) => value.equals_atom(target_value),
-                            CommonStyleAffectingAttributeMode::IsPresent(_) => false,
-                        })
-                    }) {
-                // FIXME(pcwalton): Remove once we start actually supporting RTL text. This is in
-                // here because the UA style otherwise disables all style sharing completely.
-                *shareable = false
-            }
-            match case_sensitivity {
+            let matches = match case_sensitivity {
                 CaseSensitivity::CaseSensitive => element.match_attr_equals(attr, value),
                 CaseSensitivity::CaseInsensitive => element.match_attr_equals_ignore_ascii_case(attr, value),
+            };
+
+            if matches && !is_common_style_affecting_attribute::<E::Impl>(attr, value) {
+                *relations |= AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR;
             }
+
+            matches
         }
         SimpleSelector::AttrIncludes(ref attr, ref value) => {
-            *shareable = false;
-            element.match_attr_includes(attr, value)
+            relation_if!(element.match_attr_includes(attr, value),
+                         AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR)
         }
         SimpleSelector::AttrDashMatch(ref attr, ref value) => {
-            *shareable = false;
-            element.match_attr_dash(attr, value)
+            relation_if!(element.match_attr_dash(attr, value),
+                         AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR)
         }
         SimpleSelector::AttrPrefixMatch(ref attr, ref value) => {
-            *shareable = false;
-            element.match_attr_prefix(attr, value)
+            relation_if!(element.match_attr_prefix(attr, value),
+                         AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR)
         }
         SimpleSelector::AttrSubstringMatch(ref attr, ref value) => {
-            *shareable = false;
-            element.match_attr_substring(attr, value)
+            relation_if!(element.match_attr_substring(attr, value),
+                         AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR)
         }
         SimpleSelector::AttrSuffixMatch(ref attr, ref value) => {
-            *shareable = false;
-            element.match_attr_suffix(attr, value)
+            relation_if!(element.match_attr_suffix(attr, value),
+                         AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR)
         }
         SimpleSelector::NonTSPseudoClass(ref pc) => {
-            *shareable = false;
-            element.match_non_ts_pseudo_class(pc.clone())
+            relation_if!(element.match_non_ts_pseudo_class(pc.clone()),
+                         AFFECTED_BY_STATE)
         }
+        // So seeing the :first-child/:nth-child, etc selectors makes us marking
+        // as AFFECTED_BY_POSITION unconditionally, even without match.
+        //
+        // There's no easy way to overcome this though, given we process
+        // elements in reverse order, and not doing this could lead to incorrect
+        // cache hits.
         SimpleSelector::FirstChild => {
-            *shareable = false;
-            matches_first_child(element)
+            relation_if!(matches_first_child(element), AFFECTED_BY_POSITION)
         }
         SimpleSelector::LastChild => {
-            *shareable = false;
-            matches_last_child(element)
+            // We restyle elements in reverse order, so we can play fine with
+            // this one, if we don't match, some sibling would have already done
+            // it.
+            relation_if!(matches_last_child(element), AFFECTED_BY_POSITION)
         }
         SimpleSelector::OnlyChild => {
-            *shareable = false;
-            matches_first_child(element) && matches_last_child(element)
+            // Same here, if no element ever matches, no-one will do.
+            relation_if!(matches_first_child(element) && matches_last_child(element), AFFECTED_BY_POSITION)
         }
         SimpleSelector::Root => {
-            *shareable = false;
             element.is_root()
         }
         SimpleSelector::Empty => {
-            *shareable = false;
-            element.is_empty()
+            relation_if!(element.is_empty(), AFFECTED_BY_EMPTY)
         }
         SimpleSelector::NthChild(a, b) => {
-            *shareable = false;
-            matches_generic_nth_child(element, a, b, false, false)
+            relation_if!(matches_generic_nth_child(element, a, b, false, false),
+                         AFFECTED_BY_POSITION)
         }
         SimpleSelector::NthLastChild(a, b) => {
-            *shareable = false;
-            matches_generic_nth_child(element, a, b, false, true)
+            relation_if!(matches_generic_nth_child(element, a, b, false, true),
+                         AFFECTED_BY_POSITION)
         }
         SimpleSelector::NthOfType(a, b) => {
-            *shareable = false;
-            matches_generic_nth_child(element, a, b, true, false)
+            relation_if!(matches_generic_nth_child(element, a, b, true, false),
+                         AFFECTED_BY_POSITION)
         }
         SimpleSelector::NthLastOfType(a, b) => {
-            *shareable = false;
-            matches_generic_nth_child(element, a, b, true, true)
+            relation_if!(matches_generic_nth_child(element, a, b, true, true),
+                         AFFECTED_BY_POSITION)
         }
-
         SimpleSelector::FirstOfType => {
-            *shareable = false;
-            matches_generic_nth_child(element, 0, 1, true, false)
+            relation_if!(matches_generic_nth_child(element, 0, 1, true, false),
+                         AFFECTED_BY_POSITION)
         }
         SimpleSelector::LastOfType => {
-            *shareable = false;
-            matches_generic_nth_child(element, 0, 1, true, true)
+            relation_if!(matches_generic_nth_child(element, 0, 1, true, true),
+                         AFFECTED_BY_POSITION)
         }
         SimpleSelector::OnlyOfType => {
-            *shareable = false;
-            matches_generic_nth_child(element, 0, 1, true, false) &&
-                matches_generic_nth_child(element, 0, 1, true, true)
+            relation_if!(matches_generic_nth_child(element, 0, 1, true, false) &&
+                         matches_generic_nth_child(element, 0, 1, true, true),
+                         AFFECTED_BY_POSITION)
         }
         SimpleSelector::Negation(ref negated) => {
-            *shareable = false;
-            !negated.iter().all(|s| matches_simple_selector(s, element, shareable))
+            negated.iter().any(|s| !matches_simple_selector(s, element, relations))
         }
     }
 }
@@ -732,18 +830,20 @@ fn matches_generic_nth_child<E>(element: &E,
                                 a: i32,
                                 b: i32,
                                 is_of_type: bool,
-                                is_from_end: bool)
-                                -> bool
-                                where E: Element {
+                                is_from_end: bool) -> bool
+    where E: Element
+{
     // Selectors Level 4 changed from Level 3:
     // This can match without a parent element:
     // https://drafts.csswg.org/selectors-4/#child-index
 
     let mut index = 1;
-    let mut next_sibling = match is_from_end {
-        true => element.next_sibling_element(),
-        false => element.prev_sibling_element(),
+    let mut next_sibling = if is_from_end {
+        element.next_sibling_element()
+    } else {
+        element.prev_sibling_element()
     };
+
     loop {
         let sibling = match next_sibling {
             None => break,
@@ -758,9 +858,10 @@ fn matches_generic_nth_child<E>(element: &E,
         } else {
           index += 1;
         }
-        next_sibling = match is_from_end {
-            true => sibling.next_sibling_element(),
-            false => sibling.prev_sibling_element(),
+        next_sibling = if is_from_end {
+            sibling.next_sibling_element()
+        } else {
+            sibling.prev_sibling_element()
         };
     }
 
@@ -780,6 +881,7 @@ fn matches_generic_nth_child<E>(element: &E,
             });
         }
     }
+
     result
 }
 

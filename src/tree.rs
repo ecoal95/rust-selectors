@@ -131,4 +131,6 @@ pub trait Element: MatchAttr + Sized {
     /// This may be called while the element *or one of its children* is being matched. Therefore
     /// the implementation must be thread-safe if children may be matched in parallel.
     fn insert_flags(&self, _flags: ElementFlags) {}
+
+    fn get_flags(&self) -> ElementFlags { ElementFlags::empty() }
 }

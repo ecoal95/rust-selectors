@@ -59,7 +59,7 @@ impl MaybeAtom for Atom {
 
 /// This trait allows to define the parser implementation in regards
 /// of pseudo-classes/elements
-pub trait SelectorImpl {
+pub trait SelectorImpl : Debug {
     type AttrString: MaybeAtom;
 
     /// non tree-structural pseudo-classes
@@ -112,6 +112,75 @@ pub struct Selector<Impl: SelectorImpl> {
     pub compound_selectors: Arc<CompoundSelector<Impl>>,
     pub pseudo_element: Option<Impl::PseudoElement>,
     pub specificity: u32,
+}
+
+fn affects_sibling<Impl: SelectorImpl>(simple_selector: &SimpleSelector<Impl>) -> bool {
+    match *simple_selector {
+        SimpleSelector::Negation(ref negated) => {
+            match negated.last() {
+                Some(ref last) => affects_sibling(last),
+                None => false,
+            }
+        }
+        SimpleSelector::FirstChild |
+        SimpleSelector::LastChild |
+        SimpleSelector::OnlyChild |
+        SimpleSelector::NthChild(..) |
+        SimpleSelector::NthLastChild(..) |
+        SimpleSelector::NthOfType(..) |
+        SimpleSelector::NthLastOfType(..) |
+        SimpleSelector::FirstOfType |
+        SimpleSelector::LastOfType |
+        SimpleSelector::OnlyOfType => true,
+
+        _ => false,
+    }
+}
+
+fn matches_non_common_style_affecting_attribute<Impl: SelectorImpl>(simple_selector: &SimpleSelector<Impl>) -> bool {
+    use super::matching::is_common_style_affecting_attribute_present;
+    use super::matching::is_common_style_affecting_attribute;
+    match *simple_selector {
+        SimpleSelector::Negation(ref negated) => {
+            negated.iter().any(|ref selector| matches_non_common_style_affecting_attribute(selector))
+        }
+        SimpleSelector::AttrEqual(ref attr, ref val, _) => {
+            !is_common_style_affecting_attribute::<Impl>(attr, val)
+        }
+        SimpleSelector::AttrExists(ref attr) => {
+            !is_common_style_affecting_attribute_present(attr)
+        }
+        SimpleSelector::AttrIncludes(..) |
+        SimpleSelector::AttrDashMatch(..) |
+        SimpleSelector::AttrPrefixMatch(..) |
+        SimpleSelector::AttrSuffixMatch(..) |
+        SimpleSelector::AttrSubstringMatch(..) => true,
+        _ => false,
+    }
+}
+
+impl<Impl: SelectorImpl> Selector<Impl> {
+    /// Whether this selector, if matching on a set of siblings, could affect
+    /// other sibling's style.
+    pub fn affects_siblings(&self) -> bool {
+        match self.compound_selectors.next {
+            Some((_, Combinator::NextSibling)) |
+            Some((_, Combinator::LaterSibling)) => return true,
+            _ => {},
+        }
+
+        match self.compound_selectors.simple_selectors.last() {
+            Some(ref selector) => affects_sibling(selector),
+            None => false,
+        }
+    }
+
+    pub fn matches_non_common_style_affecting_attribute(&self) -> bool {
+        match self.compound_selectors.simple_selectors.last() {
+            Some(ref selector) => matches_non_common_style_affecting_attribute(selector),
+            None => false,
+        }
+    }
 }
 
 #[cfg_attr(feature = "heap_size", derive(HeapSizeOf))]
