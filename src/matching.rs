@@ -9,7 +9,7 @@ use smallvec::VecLike;
 use quickersort::sort_by;
 use string_cache::Atom;
 
-use parser::{CaseSensitivity, Combinator, CompoundSelector, LocalName};
+use parser::{AttrSelector, CaseSensitivity, Combinator, CompoundSelector, LocalName};
 use parser::{MaybeAtom, SimpleSelector, Selector, SelectorImpl};
 use tree::Element;
 use HashMap;
@@ -299,13 +299,12 @@ impl<T> DeclarationBlock<T> {
     }
 }
 
-
 bitflags! {
     /// Set of flags that determine the different kind of elements affected by
     /// the selector matching process.
     ///
     /// This is used to implement efficient sharing.
-    pub flags StyleRelations: u8 {
+    pub flags StyleRelations: u16 {
         /// Whether this element has matched any rule that is determined by a
         /// sibling (i.e., when using the `+` combinator).
         const AFFECTED_BY_SIBLINGS = 0b01,
@@ -334,6 +333,13 @@ bitflags! {
 
         /// Whether this element matches a :not pseudo selector.
         const AFFECTED_BY_NEGATION = 0b1000000,
+
+        /// Whether this element has a style attribute.
+        const AFFECTED_BY_STYLE_ATTRIBUTE = 0b10000000,
+
+        /// Whether this element is affected by presentational hints. This is
+        /// computed externally (that is, in Servo).
+        const AFFECTED_BY_PRESENTATIONAL_HINTS = 0b100000000,
     }
 }
 
@@ -341,18 +347,46 @@ bitflags! {
     /// Set of flags that are set on the parent depending on whether a child
     /// matches a selector.
     ///
-    /// These setters, in the case of Servo, must be atomic.
-    pub flags ElementFlags: u8 {
-        const HAS_SLOW_SELECTOR = 0x01,
-        #[doc = "When a child is added or removed from this element, any later children must be"]
-        #[doc = "restyled, because they may match :nth-child, :first-of-type, or :nth-of-type."]
-        const HAS_SLOW_SELECTOR_LATER_SIBLINGS = 0x02,
-        #[doc = "When a child is added or removed from this element, the first and last children"]
-        #[doc = "must be restyled, because they may match :first-child, :last-child, or"]
-        #[doc = ":only-child."]
-        const HAS_EDGE_CHILD_SELECTOR = 0x04,
+    /// These setters, in the case of Servo, must be atomic, due to the parallel
+    /// traversal.
+    ///
+    /// NOTE: Please ensure the firsts match with the appropriate ones from
+    /// StyleRelations!
+    pub flags ElementFlags: u16 {
+        const CHILDREN_AFFECTED_BY_SIBLINGS = 0b01,
+        const CHILDREN_AFFECTED_BY_POSITION = 0b10,
+        const CHILDREN_AFFECTED_BY_STATE = 0b100,
+        const CHILDREN_AFFECTED_BY_UNIQUE_SELECTOR = 0b1000,
+        const CHILDREN_AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR = 0b10000,
+        const CHILDREN_AFFECTED_BY_EMPTY = 0b100000,
+        const CHILDREN_AFFECTED_BY_NEGATION = 0b1000000,
+        const CHILDREN_AFFECTED_BY_STYLE_ATTRIBUTE = 0b10000000,
+        const CHILDREN_AFFECTED_BY_PRESENTATIONAL_HINTS = 0b100000000,
+
+        /// When a child is added or removed from this element, all the children
+        /// must be restyled, because they may match :nth-last-child,
+        /// :last-of-type, :nth-last-of-type, or :only-of-type.
+        const HAS_SLOW_SELECTOR = 0b1000000000,
+
+        /// When a child is added or removed from this element, any later
+        /// children must be restyled, because they may match :nth-child,
+        /// :first-of-type, or :nth-of-type.
+        const HAS_SLOW_SELECTOR_LATER_SIBLINGS = 0b10000000000,
+
+        /// When a child is added or removed from this element, the first and
+        /// last children must be restyled, because they may match :first-child,
+        /// :last-child, or :only-child.
+        const HAS_EDGE_CHILD_SELECTOR = 0b100000000000,
     }
 }
+
+impl From<StyleRelations> for ElementFlags {
+    #[inline]
+    fn from(relations: StyleRelations) -> ElementFlags {
+        ElementFlags::from_bits_truncate(relations.bits())
+    }
+}
+
 
 pub fn matches<E>(selector_list: &[Selector<E::Impl>],
                   element: &E,
@@ -379,7 +413,15 @@ pub fn matches_compound_selector<E>(selector: &CompoundSelector<E::Impl>,
     where E: Element
 {
     match matches_compound_selector_internal(selector, element, parent_bf, relations) {
-        SelectorMatchingResult::Matched => true,
+        SelectorMatchingResult::Matched => {
+            match selector.next {
+                Some((_, Combinator::NextSibling)) |
+                Some((_, Combinator::LaterSibling)) => *relations |= AFFECTED_BY_SIBLINGS,
+                _ => {}
+            }
+
+            true
+        }
         _ => false
     }
 }
@@ -492,7 +534,6 @@ fn can_fast_reject<E>(mut selector: &CompoundSelector<E::Impl>,
                 _ => {},
             }
         }
-
     }
 
     // Can't fast reject.
@@ -623,6 +664,44 @@ pub fn rare_style_affecting_attributes() -> [Atom; 3] {
     [ atom!("bgcolor"), atom!("border"), atom!("colspan") ]
 }
 
+#[inline]
+fn is_common_style_affecting_attribute_present(selector: &AttrSelector) -> bool {
+    for attr in &common_style_affecting_attributes() {
+        if selector.name == attr.atom {
+            if let CommonStyleAffectingAttributeMode::IsPresent(_) = attr.mode {
+                return true
+            }
+            // Short-circuit, common style affecting attributes aren't
+            // duplicated.
+            return false
+        }
+    }
+
+    false
+}
+
+#[inline]
+fn is_common_style_affecting_attribute<Impl>(selector: &AttrSelector,
+                                             impl_value: &Impl::AttrString) -> bool
+    where Impl: SelectorImpl
+{
+    for attr in &common_style_affecting_attributes() {
+        if selector.name == attr.atom {
+            if let CommonStyleAffectingAttributeMode::IsEqual(ref value, _) = attr.mode {
+                if impl_value.equals_atom(value) {
+                    return true
+                }
+            }
+
+            // Short-circuit, common style affecting attributes aren't
+            // duplicated.
+            return false;
+        }
+    }
+
+    false
+}
+
 /// Determines whether the given element matches the given single selector.
 ///
 /// NB: If you add support for any new kinds of selectors to this routine, be sure to set
@@ -638,6 +717,7 @@ pub fn matches_simple_selector<E>(selector: &SimpleSelector<E::Impl>,
     macro_rules! relation_if {
         ($ex:expr, $flag:ident) => {
             if $ex {
+                println!("Found a match to add a relation {:?} {}", $flag, stringify!($ex));
                 *relations |= $flag;
                 true
             } else {
@@ -664,12 +744,7 @@ pub fn matches_simple_selector<E>(selector: &SimpleSelector<E::Impl>,
         SimpleSelector::AttrExists(ref attr) => {
             let matches = element.match_attr_has(attr);
 
-            if matches && common_style_affecting_attributes().iter().any(|common_attr_info| {
-                common_attr_info.atom != attr.name || match common_attr_info.mode {
-                   CommonStyleAffectingAttributeMode::IsEqual(_, _) => true,
-                   CommonStyleAffectingAttributeMode::IsPresent(_) => false,
-                }
-            }) {
+            if matches && !is_common_style_affecting_attribute_present(attr) {
                 *relations |= AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR;
             }
 
@@ -681,12 +756,7 @@ pub fn matches_simple_selector<E>(selector: &SimpleSelector<E::Impl>,
                 CaseSensitivity::CaseInsensitive => element.match_attr_equals_ignore_ascii_case(attr, value),
             };
 
-            if matches && common_style_affecting_attributes().iter().any(|common_attr_info| {
-                common_attr_info.atom != attr.name || match common_attr_info.mode {
-                   CommonStyleAffectingAttributeMode::IsEqual(ref target_value, _) => !value.equals_atom(target_value),
-                   CommonStyleAffectingAttributeMode::IsPresent(_) => true,
-                }
-            }) {
+            if matches && !is_common_style_affecting_attribute::<E::Impl>(attr, value) {
                 *relations |= AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR;
             }
 
