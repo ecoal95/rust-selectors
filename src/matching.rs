@@ -19,66 +19,76 @@ bitflags! {
     /// the selector matching process.
     ///
     /// This is used to implement efficient sharing.
-    pub flags StyleRelations: u16 {
+    pub flags StyleRelations: u32 {
         /// Whether this element has matched any rule that is determined by a
         /// sibling (when using the `+` or `~` combinators).
         const AFFECTED_BY_SIBLINGS = 1 << 0,
 
-        /// Whether this element has matched any rule whose matching is
-        /// determined by its position in the tree (i.e., first-child,
-        /// nth-child, etc.).
-        ///
-        /// XXX improve this description and name, "position" is too generic.
-        const AFFECTED_BY_CHILD_INDEX = 1 << 1,
-
         /// Whether this flag is affected by any state (i.e., non
         /// tree-structural pseudo-class).
-        const AFFECTED_BY_STATE = 1 << 2,
+        const AFFECTED_BY_STATE = 1 << 1,
 
         /// Whether this element is affected by an ID selector.
-        const AFFECTED_BY_ID_SELECTOR = 1 << 3,
+        const AFFECTED_BY_ID_SELECTOR = 1 << 2,
 
         /// Whether this element is affected by a non-common style-affecting
         /// attribute.
-        const AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR = 1 << 4,
+        const AFFECTED_BY_NON_COMMON_STYLE_AFFECTING_ATTRIBUTE_SELECTOR = 1 << 3,
 
         /// Whether this element matches the :empty pseudo class.
-        const AFFECTED_BY_EMPTY = 1 << 5,
+        const AFFECTED_BY_EMPTY = 1 << 4,
 
         /// Whether this element has a style attribute. Computed
         /// externally.
-        const AFFECTED_BY_STYLE_ATTRIBUTE = 1 << 6,
+        const AFFECTED_BY_STYLE_ATTRIBUTE = 1 << 5,
 
         /// Whether this element is affected by presentational hints. This is
         /// computed externally (that is, in Servo).
-        const AFFECTED_BY_PRESENTATIONAL_HINTS = 1 << 7,
+        const AFFECTED_BY_PRESENTATIONAL_HINTS = 1 << 6,
 
         /// Whether this element has pseudo-element styles. Computed externally.
-        const AFFECTED_BY_PSEUDO_ELEMENTS = 1 << 8,
+        const AFFECTED_BY_PSEUDO_ELEMENTS = 1 << 7,
+
+        /// :nth-of-type
+        const AFFECTED_BY_NTH_OF_TYPE = 1 << 8,
+
+        /// :nth-last-of-type
+        const AFFECTED_BY_NTH_LAST_OF_TYPE = 1 << 9,
+
+        /// :first-of-type
+        const AFFECTED_BY_FIRST_OF_TYPE = 1 << 10,
+
+        /// :last-of-type
+        const AFFECTED_BY_LAST_OF_TYPE = 1 << 11,
+
+        /// :only-of-type
+        const AFFECTED_BY_ONLY_OF_TYPE = 1 << 12,
+
+        /// :nth-child
+        const AFFECTED_BY_NTH_CHILD = 1 << 13,
+
+        /// :nth-last-child
+        const AFFECTED_BY_NTH_LAST_CHILD = 1 << 14,
+
+        /// :first-child
+        const AFFECTED_BY_FIRST_CHILD = 1 << 15,
+
+        /// :last-child
+        const AFFECTED_BY_LAST_CHILD = 1 << 16,
+
+        /// :only-child
+        const AFFECTED_BY_ONLY_CHILD = 1 << 17,
     }
 }
 
-bitflags! {
-    /// Set of flags that are set on the parent depending on whether a child
-    /// matches a selector.
-    ///
-    /// These setters, in the case of Servo, must be atomic, due to the parallel
-    /// traversal.
-    pub flags ElementFlags: u8 {
-        /// When a child is added or removed from this element, all the children
-        /// must be restyled, because they may match :nth-last-child,
-        /// :last-of-type, :nth-last-of-type, or :only-of-type.
-        const HAS_SLOW_SELECTOR = 1 << 0,
-
-        /// When a child is added or removed from this element, any later
-        /// children must be restyled, because they may match :nth-child,
-        /// :first-of-type, or :nth-of-type.
-        const HAS_SLOW_SELECTOR_LATER_SIBLINGS = 1 << 1,
-
-        /// When a child is added or removed from this element, the first and
-        /// last children must be restyled, because they may match :first-child,
-        /// :last-child, or :only-child.
-        const HAS_EDGE_CHILD_SELECTOR = 1 << 2,
+impl StyleRelations {
+    #[inline]
+    pub fn affected_by_child_index(&self) -> bool {
+        self.intersects(AFFECTED_BY_NTH_OF_TYPE | AFFECTED_BY_NTH_LAST_OF_TYPE |
+                        AFFECTED_BY_FIRST_OF_TYPE | AFFECTED_BY_LAST_OF_TYPE |
+                        AFFECTED_BY_NTH_CHILD | AFFECTED_BY_NTH_LAST_CHILD |
+                        AFFECTED_BY_FIRST_CHILD | AFFECTED_BY_LAST_CHILD |
+                        AFFECTED_BY_ONLY_OF_TYPE | AFFECTED_BY_ONLY_CHILD)
     }
 }
 
@@ -319,7 +329,7 @@ fn matches_simple_selector<E>(
     where E: Element
 {
     macro_rules! relation_if {
-        ($ex:expr, $flag:ident) => {
+        ($ex:expr, $flag:expr) => {
             if $ex {
                 *relations |= $flag;
                 true
@@ -390,15 +400,6 @@ fn matches_simple_selector<E>(
             relation_if!(element.match_non_ts_pseudo_class(pc.clone()),
                          AFFECTED_BY_STATE)
         }
-        SimpleSelector::FirstChild => {
-            relation_if!(matches_first_child(element), AFFECTED_BY_CHILD_INDEX)
-        }
-        SimpleSelector::LastChild => {
-            relation_if!(matches_last_child(element), AFFECTED_BY_CHILD_INDEX)
-        }
-        SimpleSelector::OnlyChild => {
-            relation_if!(matches_first_child(element) && matches_last_child(element), AFFECTED_BY_CHILD_INDEX)
-        }
         SimpleSelector::Root => {
             // We never share styles with an element with no parent, so no point
             // in creating a new StyleRelation.
@@ -407,34 +408,46 @@ fn matches_simple_selector<E>(
         SimpleSelector::Empty => {
             relation_if!(element.is_empty(), AFFECTED_BY_EMPTY)
         }
+        SimpleSelector::FirstChild => {
+            relation_if!(matches_first_child(element),
+                         AFFECTED_BY_FIRST_CHILD)
+        }
+        SimpleSelector::LastChild => {
+            relation_if!(matches_last_child(element),
+                         AFFECTED_BY_LAST_CHILD)
+        }
+        SimpleSelector::OnlyChild => {
+            relation_if!(matches_first_child(element) && matches_last_child(element),
+                         AFFECTED_BY_ONLY_CHILD)
+        }
         SimpleSelector::NthChild(a, b) => {
             relation_if!(matches_generic_nth_child(element, a, b, false, false),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_NTH_CHILD)
         }
         SimpleSelector::NthLastChild(a, b) => {
             relation_if!(matches_generic_nth_child(element, a, b, false, true),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_NTH_LAST_CHILD)
         }
         SimpleSelector::NthOfType(a, b) => {
             relation_if!(matches_generic_nth_child(element, a, b, true, false),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_NTH_OF_TYPE)
         }
         SimpleSelector::NthLastOfType(a, b) => {
             relation_if!(matches_generic_nth_child(element, a, b, true, true),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_NTH_LAST_OF_TYPE)
         }
         SimpleSelector::FirstOfType => {
             relation_if!(matches_generic_nth_child(element, 0, 1, true, false),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_FIRST_OF_TYPE)
         }
         SimpleSelector::LastOfType => {
             relation_if!(matches_generic_nth_child(element, 0, 1, true, true),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_LAST_OF_TYPE)
         }
         SimpleSelector::OnlyOfType => {
             relation_if!(matches_generic_nth_child(element, 0, 1, true, false) &&
                          matches_generic_nth_child(element, 0, 1, true, true),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_ONLY_OF_TYPE)
         }
         SimpleSelector::Negation(ref negated) => {
             !negated.iter().all(|s| {
@@ -484,24 +497,12 @@ fn matches_generic_nth_child<E>(element: &E,
         };
     }
 
-    let result = if a == 0 {
+    if a == 0 {
         b == index
     } else {
         (index - b) / a >= 0 &&
         (index - b) % a == 0
-    };
-
-    if result {
-        if let Some(parent) = element.parent_element() {
-            parent.insert_flags(if is_from_end {
-                HAS_SLOW_SELECTOR
-            } else {
-                HAS_SLOW_SELECTOR_LATER_SIBLINGS
-            });
-        }
     }
-
-    result
 }
 
 #[inline]
@@ -509,13 +510,7 @@ fn matches_first_child<E>(element: &E) -> bool where E: Element {
     // Selectors Level 4 changed from Level 3:
     // This can match without a parent element:
     // https://drafts.csswg.org/selectors-4/#child-index
-    let result = element.prev_sibling_element().is_none();
-    if result {
-        if let Some(parent) = element.parent_element() {
-            parent.insert_flags(HAS_EDGE_CHILD_SELECTOR);
-        }
-    }
-    result
+    element.prev_sibling_element().is_none()
 }
 
 #[inline]
@@ -523,11 +518,5 @@ fn matches_last_child<E>(element: &E) -> bool where E: Element {
     // Selectors Level 4 changed from Level 3:
     // This can match without a parent element:
     // https://drafts.csswg.org/selectors-4/#child-index
-    let result = element.next_sibling_element().is_none();
-    if result {
-        if let Some(parent) = element.parent_element() {
-            parent.insert_flags(HAS_EDGE_CHILD_SELECTOR);
-        }
-    }
-    result
+    element.next_sibling_element().is_none()
 }
