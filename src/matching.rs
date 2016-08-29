@@ -27,8 +27,6 @@ bitflags! {
         /// Whether this element has matched any rule whose matching is
         /// determined by its position in the tree (i.e., first-child,
         /// nth-child, etc.).
-        ///
-        /// XXX improve this description and name, "position" is too generic.
         const AFFECTED_BY_CHILD_INDEX = 1 << 1,
 
         /// Whether this flag is affected by any state (i.e., non
@@ -55,30 +53,21 @@ bitflags! {
 
         /// Whether this element has pseudo-element styles. Computed externally.
         const AFFECTED_BY_PSEUDO_ELEMENTS = 1 << 8,
-    }
-}
 
-bitflags! {
-    /// Set of flags that are set on the parent depending on whether a child
-    /// matches a selector.
-    ///
-    /// These setters, in the case of Servo, must be atomic, due to the parallel
-    /// traversal.
-    pub flags ElementFlags: u8 {
-        /// When a child is added or removed from this element, all the children
-        /// must be restyled, because they may match :nth-last-child,
+        /// When a child is added or removed from the parent element, all the
+        /// children must be restyled, because they may match :nth-last-child,
         /// :last-of-type, :nth-last-of-type, or :only-of-type.
-        const HAS_SLOW_SELECTOR = 1 << 0,
+        const PARENT_HAS_SLOW_SELECTOR = 1 << 9,
 
-        /// When a child is added or removed from this element, any later
+        /// When a child is added or removed from the parent element, any later
         /// children must be restyled, because they may match :nth-child,
         /// :first-of-type, or :nth-of-type.
-        const HAS_SLOW_SELECTOR_LATER_SIBLINGS = 1 << 1,
+        const PARENT_HAS_SLOW_SELECTOR_LATER_SIBLINGS = 1 << 10,
 
-        /// When a child is added or removed from this element, the first and
-        /// last children must be restyled, because they may match :first-child,
-        /// :last-child, or :only-child.
-        const HAS_EDGE_CHILD_SELECTOR = 1 << 2,
+        /// When a child is added or removed from the parent element, the first
+        /// and last children must be restyled, because they may match
+        /// :first-child, :last-child, or :only-child.
+        const PARENT_HAS_EDGE_CHILD_SELECTOR = 1 << 11,
     }
 }
 
@@ -319,7 +308,7 @@ fn matches_simple_selector<E>(
     where E: Element
 {
     macro_rules! relation_if {
-        ($ex:expr, $flag:ident) => {
+        ($ex:expr, $flag:expr) => {
             if $ex {
                 *relations |= $flag;
                 true
@@ -391,10 +380,12 @@ fn matches_simple_selector<E>(
                          AFFECTED_BY_STATE)
         }
         SimpleSelector::FirstChild => {
-            relation_if!(matches_first_child(element), AFFECTED_BY_CHILD_INDEX)
+            relation_if!(matches_first_child(element),
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_EDGE_CHILD_SELECTOR)
         }
         SimpleSelector::LastChild => {
-            relation_if!(matches_last_child(element), AFFECTED_BY_CHILD_INDEX)
+            relation_if!(matches_last_child(element),
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_EDGE_CHILD_SELECTOR)
         }
         SimpleSelector::OnlyChild => {
             relation_if!(matches_first_child(element) && matches_last_child(element), AFFECTED_BY_CHILD_INDEX)
@@ -409,32 +400,32 @@ fn matches_simple_selector<E>(
         }
         SimpleSelector::NthChild(a, b) => {
             relation_if!(matches_generic_nth_child(element, a, b, false, false),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_SLOW_SELECTOR_LATER_SIBLINGS)
         }
         SimpleSelector::NthLastChild(a, b) => {
             relation_if!(matches_generic_nth_child(element, a, b, false, true),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_SLOW_SELECTOR)
         }
         SimpleSelector::NthOfType(a, b) => {
             relation_if!(matches_generic_nth_child(element, a, b, true, false),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_SLOW_SELECTOR_LATER_SIBLINGS)
         }
         SimpleSelector::NthLastOfType(a, b) => {
             relation_if!(matches_generic_nth_child(element, a, b, true, true),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_SLOW_SELECTOR)
         }
         SimpleSelector::FirstOfType => {
             relation_if!(matches_generic_nth_child(element, 0, 1, true, false),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_SLOW_SELECTOR_LATER_SIBLINGS)
         }
         SimpleSelector::LastOfType => {
             relation_if!(matches_generic_nth_child(element, 0, 1, true, true),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_SLOW_SELECTOR)
         }
         SimpleSelector::OnlyOfType => {
             relation_if!(matches_generic_nth_child(element, 0, 1, true, false) &&
                          matches_generic_nth_child(element, 0, 1, true, true),
-                         AFFECTED_BY_CHILD_INDEX)
+                         AFFECTED_BY_CHILD_INDEX | PARENT_HAS_SLOW_SELECTOR)
         }
         SimpleSelector::Negation(ref negated) => {
             !negated.iter().all(|s| {
@@ -484,24 +475,12 @@ fn matches_generic_nth_child<E>(element: &E,
         };
     }
 
-    let result = if a == 0 {
+    if a == 0 {
         b == index
     } else {
         (index - b) / a >= 0 &&
         (index - b) % a == 0
-    };
-
-    if result {
-        if let Some(parent) = element.parent_element() {
-            parent.insert_flags(if is_from_end {
-                HAS_SLOW_SELECTOR
-            } else {
-                HAS_SLOW_SELECTOR_LATER_SIBLINGS
-            });
-        }
     }
-
-    result
 }
 
 #[inline]
@@ -509,13 +488,7 @@ fn matches_first_child<E>(element: &E) -> bool where E: Element {
     // Selectors Level 4 changed from Level 3:
     // This can match without a parent element:
     // https://drafts.csswg.org/selectors-4/#child-index
-    let result = element.prev_sibling_element().is_none();
-    if result {
-        if let Some(parent) = element.parent_element() {
-            parent.insert_flags(HAS_EDGE_CHILD_SELECTOR);
-        }
-    }
-    result
+    element.prev_sibling_element().is_none()
 }
 
 #[inline]
@@ -523,11 +496,5 @@ fn matches_last_child<E>(element: &E) -> bool where E: Element {
     // Selectors Level 4 changed from Level 3:
     // This can match without a parent element:
     // https://drafts.csswg.org/selectors-4/#child-index
-    let result = element.next_sibling_element().is_none();
-    if result {
-        if let Some(parent) = element.parent_element() {
-            parent.insert_flags(HAS_EDGE_CHILD_SELECTOR);
-        }
-    }
-    result
+    element.next_sibling_element().is_none()
 }
